@@ -1,10 +1,13 @@
 import pkg from 'whatsapp-web.js';
-const { Client, LocalAuth } = pkg;
+const { Client, LocalAuth, MessageMedia } = pkg;
 import qrcode from 'qrcode-terminal';
 import axios from 'axios';
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
+import fs from 'fs';
+import path from 'path';
+import FormData from 'form-data';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -53,6 +56,7 @@ client.on('ready', () => {
     console.log(`📞 Bot Phone Number: ${client.info.wid.user}`);
     console.log(`🔗 Connected to Python Backend: ${PYTHON_API_URL}`);
     console.log('🌾 Ready to help farmers with agricultural advice!\n');
+    console.log('🎙️ Voice message support: ENABLED\n');
 });
 
 // Authentication events
@@ -70,6 +74,145 @@ client.on('disconnected', (reason) => {
     console.log('♻️  Attempting to reconnect...');
 });
 
+/**
+ * Process voice message
+ * Downloads voice message, converts to format suitable for transcription
+ */
+async function processVoiceMessage(message, chat, contact) {
+    const contactName = contact.pushname || contact.name || message.from;
+    
+    try {
+        console.log(`   🎙️ Processing voice message from ${contactName}...`);
+        
+        // Send typing indicator
+        await chat.sendStateTyping();
+        
+        // Download the voice message
+        const media = await message.downloadMedia();
+        
+        if (!media) {
+            throw new Error('Failed to download voice message');
+        }
+        
+        console.log(`   📥 Voice message downloaded (${media.mimetype})`);
+        
+        // Create temp directory if it doesn't exist
+        const tempDir = path.join(__dirname, 'temp');
+        if (!fs.existsSync(tempDir)) {
+            fs.mkdirSync(tempDir, { recursive: true });
+        }
+        
+        // Save to temporary file
+        const timestamp = Date.now();
+        const tempFilePath = path.join(tempDir, `voice_${timestamp}.ogg`);
+        
+        // Convert base64 to buffer and save
+        const buffer = Buffer.from(media.data, 'base64');
+        fs.writeFileSync(tempFilePath, buffer);
+        
+        console.log(`   💾 Voice saved to: ${tempFilePath}`);
+        console.log(`   📤 Sending to Python backend for transcription...`);
+        
+        // Send to Python backend for transcription and processing
+        const formData = new FormData();
+        formData.append('file', fs.createReadStream(tempFilePath), {
+            filename: `voice_${timestamp}.ogg`,
+            contentType: media.mimetype || 'audio/ogg'
+        });
+        
+        const startTime = Date.now();
+        
+        const response = await axios.post(`${PYTHON_API_URL}/process_voice`, formData, {
+            headers: {
+                ...formData.getHeaders()
+            },
+            timeout: 120000, // 2 minute timeout for voice processing
+            maxContentLength: Infinity,
+            maxBodyLength: Infinity
+        });
+        
+        const processingTime = Date.now() - startTime;
+        
+        // Clean up temp file
+        try {
+            fs.unlinkSync(tempFilePath);
+            console.log(`   🗑️ Cleaned up temp file`);
+        } catch (cleanupError) {
+            console.warn(`   ⚠️ Failed to cleanup temp file: ${cleanupError.message}`);
+        }
+        
+        const { transcribed_text, response: aiResponse, language, metadata } = response.data;
+        
+        console.log(`   ⚡ Voice processed in ${processingTime}ms`);
+        console.log(`   🗣️ Detected language: ${language || 'unknown'}`);
+        console.log(`   📝 Transcribed: "${transcribed_text.substring(0, 100)}${transcribed_text.length > 100 ? '...' : ''}"`);
+        console.log(`   🤖 AI Response: "${aiResponse.substring(0, 100)}${aiResponse.length > 100 ? '...' : ''}"`);
+        
+        // Send the transcription first (optional - for transparency)
+        if (transcribed_text) {
+            await message.reply(`🎙️ _You said:_ "${transcribed_text}"\n\n${aiResponse}`);
+        } else {
+            await message.reply(aiResponse);
+        }
+        
+        await chat.clearState();
+        console.log(`   ✅ Voice message processed successfully\n`);
+        
+        // Store conversation context
+        activeConversations.set(message.from, {
+            lastMessage: transcribed_text,
+            lastResponse: aiResponse,
+            timestamp: new Date(),
+            messageType: 'voice'
+        });
+        
+    } catch (error) {
+        console.error(`   ❌ Error processing voice message:`, error.message);
+        
+        // Clean up temp file in case of error
+        try {
+            const tempDir = path.join(__dirname, 'temp');
+            const files = fs.readdirSync(tempDir);
+            files.forEach(file => {
+                if (file.startsWith('voice_')) {
+                    const filePath = path.join(tempDir, file);
+                    try {
+                        fs.unlinkSync(filePath);
+                    } catch (e) {
+                        // Ignore cleanup errors
+                    }
+                }
+            });
+        } catch (cleanupError) {
+            // Ignore cleanup errors
+        }
+        
+        // Send error message to user
+        try {
+            await chat.clearState();
+            
+            let errorMessage = '';
+            
+            if (error.code === 'ECONNREFUSED') {
+                errorMessage = '⚠️ Sorry, I\'m having trouble connecting to my brain (backend service is down). Please try again in a moment.';
+            } else if (error.code === 'ETIMEDOUT' || error.message.includes('timeout')) {
+                errorMessage = '⚠️ Sorry, processing your voice message took too long. Please try sending a shorter message or try again.';
+            } else if (error.message.includes('Unsupported audio format')) {
+                errorMessage = '⚠️ Sorry, I couldn\'t process that audio format. Please try recording your voice message again.';
+            } else if (error.message.includes('transcription failed')) {
+                errorMessage = '⚠️ Sorry, I couldn\'t understand the audio. Please try speaking more clearly or send a text message instead.';
+            } else {
+                errorMessage = '⚠️ Sorry, I encountered an error processing your voice message. Please try again or send a text message instead.';
+            }
+            
+            await message.reply(errorMessage);
+            console.log(`   ⚠️  Sent error message to user\n`);
+        } catch (sendError) {
+            console.error(`   ❌ Failed to send error message:`, sendError.message);
+        }
+    }
+}
+
 // Message handler
 client.on('message', async (message) => {
     try {
@@ -80,6 +223,22 @@ client.on('message', async (message) => {
 
         // Ignore group messages and status updates
         if (from.includes('@g.us') || from.includes('status@broadcast')) {
+            return;
+        }
+
+        // Check if message is a voice message (PTT - Push to Talk)
+        if (message.hasMedia && message.type === 'ptt') {
+            console.log(`\n🎙️ Voice message from ${contactName} (${from})`);
+            const chat = await message.getChat();
+            await processVoiceMessage(message, chat, contact);
+            return;
+        }
+
+        // Check for other audio types
+        if (message.hasMedia && (message.type === 'audio' || message.type === 'voice')) {
+            console.log(`\n🎙️ Audio message from ${contactName} (${from})`);
+            const chat = await message.getChat();
+            await processVoiceMessage(message, chat, contact);
             return;
         }
 
@@ -103,6 +262,9 @@ I'm your agricultural advisor, here to help Ghanaian farmers with:
 💡 Farming best practices
 
 *How can I help you today?*
+
+💬 Send me a text message
+🎙️ Send me a voice message
 
 Example questions:
 • How do I control fall armyworm?
@@ -131,7 +293,11 @@ You can ask about:
 • Harvesting and storage
 • And much more!
 
-Just type your question and I'll do my best to help! 🌾`;
+*How to use:*
+💬 Type your question
+🎙️ Send a voice message in English or Twi
+
+Just ask and I'll do my best to help! 🌾`;
 
             await chat.clearState();
             await message.reply(helpMessage);
@@ -172,7 +338,8 @@ Just type your question and I'll do my best to help! 🌾`;
         activeConversations.set(from, {
             lastMessage: messageBody,
             lastResponse: aiResponse,
-            timestamp: new Date()
+            timestamp: new Date(),
+            messageType: 'text'
         });
 
     } catch (error) {
@@ -213,6 +380,18 @@ client.initialize();
 // Graceful shutdown
 process.on('SIGINT', async () => {
     console.log('\n\n🛑 Shutting down gracefully...');
+    
+    // Clean up temp directory
+    try {
+        const tempDir = path.join(__dirname, 'temp');
+        if (fs.existsSync(tempDir)) {
+            fs.rmSync(tempDir, { recursive: true, force: true });
+            console.log('🗑️ Cleaned up temporary files');
+        }
+    } catch (e) {
+        console.warn('⚠️ Failed to cleanup temp directory:', e.message);
+    }
+    
     await client.destroy();
     console.log('✅ WhatsApp client destroyed');
     process.exit(0);
@@ -220,6 +399,17 @@ process.on('SIGINT', async () => {
 
 process.on('SIGTERM', async () => {
     console.log('\n\n🛑 Received SIGTERM, shutting down...');
+    
+    // Clean up temp directory
+    try {
+        const tempDir = path.join(__dirname, 'temp');
+        if (fs.existsSync(tempDir)) {
+            fs.rmSync(tempDir, { recursive: true, force: true });
+        }
+    } catch (e) {
+        // Ignore cleanup errors
+    }
+    
     await client.destroy();
     console.log('✅ WhatsApp client destroyed');
     process.exit(0);

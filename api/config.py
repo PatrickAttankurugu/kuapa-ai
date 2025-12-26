@@ -16,4 +16,18 @@ GOOGLE_TTS_CREDENTIALS_JSON_PATH = os.getenv("GOOGLE_TTS_CREDENTIALS_JSON_PATH",
 WHATSAPP_PHONE_NUMBER = os.getenv("WHATSAPP_PHONE_NUMBER", "+233551087418")
 PYTHON_API_URL = os.getenv("PYTHON_API_URL", "http://localhost:8000")
 
+# Audio Processing
+SUPPORTED_AUDIO_FORMATS = [
+    'audio/ogg', 'audio/mpeg', 'audio/wav', 'audio/x-wav',
+    'audio/mp3', 'audio/mp4', 'audio/m4a', 'audio/x-m4a',
+    'audio/aac', 'audio/flac', 'audio/webm'
+]
 
+# Supported Languages
+SUPPORTED_LANGUAGES = {
+    'en': 'English',
+    'tw': 'Twi (Akan)',
+    'ga': 'Ga',
+    'ee': 'Ewe',
+    'dag': 'Dagbani'
+}

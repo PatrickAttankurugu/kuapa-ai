@@ -1,5 +1,5 @@
 import os
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from .config import GEMINI_API_KEY, GEMINI_MODEL, LLM_TEMPERATURE
 
 try:
@@ -14,13 +14,31 @@ SYSTEM_PROMPT = (
     "Never hallucinate facts. Use provided context for accurate advice."
 )
 
-async def answer(query: str, context_chunks: List[Tuple[str, float, str]]) -> str:
+# Language-specific system prompts
+LANGUAGE_PROMPTS = {
+    "en": "Respond in English.",
+    "tw": "Respond in Twi (Akan language). Use Twi vocabulary and grammar.",
+    "ga": "Respond in Ga language. Use Ga vocabulary and grammar.",
+    "ee": "Respond in Ewe language. Use Ewe vocabulary and grammar.",
+    "dag": "Respond in Dagbani language. Use Dagbani vocabulary and grammar."
+}
+
+LANGUAGE_NAMES = {
+    "en": "English",
+    "tw": "Twi",
+    "ga": "Ga",
+    "ee": "Ewe",
+    "dag": "Dagbani"
+}
+
+async def answer(query: str, context_chunks: List[Tuple[str, float, str]], language: Optional[str] = None) -> str:
     """
     Generate an answer using Google Gemini 2.5 Flash based on the query and context.
 
     Args:
         query: User's question
         context_chunks: List of (content, score, source) tuples from RAG retrieval
+        language: Language code for response (en, tw, ga, ee, dag). Auto-detect if None.
 
     Returns:
         Generated answer string
@@ -48,15 +66,22 @@ async def answer(query: str, context_chunks: List[Tuple[str, float, str]]) -> st
         # Build context from retrieved chunks
         context_text = "\n\n".join([f"[source: {s}] {c}" for c, _, s in context_chunks])
 
+        # Get language instruction
+        language_code = language or "en"
+        language_instruction = LANGUAGE_PROMPTS.get(language_code, LANGUAGE_PROMPTS["en"])
+        language_name = LANGUAGE_NAMES.get(language_code, "English")
+
         # Create the full prompt
         full_prompt = f"""{SYSTEM_PROMPT}
 
-Question: {query}
+{language_instruction}
+
+Question (may be in {language_name}): {query}
 
 Context:
 {context_text}
 
-Answer in under 180 tokens, providing practical and accurate agricultural advice."""
+Provide a practical and accurate answer in {language_name}, using simple language that farmers can understand. Keep the response under 180 tokens."""
 
         # Generate response (synchronous API, but wrapped in async function)
         response = model.generate_content(full_prompt)
@@ -64,4 +89,14 @@ Answer in under 180 tokens, providing practical and accurate agricultural advice
         return response.text.strip()
 
     except Exception as e:
-        return f"Sorry, I encountered an error generating a response: {str(e)}"
+        # Provide error message in appropriate language
+        error_messages = {
+            "en": f"Sorry, I encountered an error generating a response: {str(e)}",
+            "tw": f"Kosɛ, manya haw wɔ mmuae a mede reba no mu: {str(e)}",
+            "ga": f"Afɛmɔ, mi kɛ hiaŋ lɛ ni nitsumɔi lɛ: {str(e)}",
+            "ee": f"Miɖe kuku, mekpɔ kuxi aɖe le ŋuɖoɖo nam me: {str(e)}",
+            "dag": f"N paai, n nya zuɣu: {str(e)}"
+        }
+        
+        language_code = language or "en"
+        return error_messages.get(language_code, error_messages["en"])
