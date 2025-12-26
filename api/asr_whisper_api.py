@@ -249,20 +249,23 @@ def _simple_language_detection(text: str) -> str:
 async def _convert_audio_if_needed(audio_path: str) -> str:
     """
     Convert audio to WAV format if needed
-    Gemini supports: WAV, MP3, AIFF, AAC, OGG, FLAC
+    WhatsApp sends OGG Opus which Gemini doesn't support well - always convert to WAV
+    Gemini officially supports: WAV, MP3, AIFF, AAC, FLAC
     """
     file_ext = Path(audio_path).suffix.lower()
     
-    # These formats are directly supported
-    supported_formats = ['.wav', '.mp3', '.aiff', '.aac', '.ogg', '.flac', '.m4a']
-    
-    if file_ext in supported_formats:
+    # Always convert OGG files (WhatsApp voice messages) to WAV
+    # because Gemini has issues with OGG Opus codec
+    if file_ext == '.ogg':
+        logger.info(f"Converting OGG to WAV (Gemini doesn't support OGG Opus well)...")
+    # These formats work directly with Gemini
+    elif file_ext in ['.wav', '.mp3', '.aiff', '.aac', '.flac']:
         logger.info(f"Audio format {file_ext} is supported, no conversion needed")
         return audio_path
+    else:
+        logger.info(f"Converting audio from {file_ext} to WAV...")
     
     try:
-        logger.info(f"Converting audio from {file_ext} to WAV...")
-        
         # Load audio file
         audio = AudioSegment.from_file(audio_path)
         

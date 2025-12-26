@@ -146,14 +146,17 @@ async def process_voice(file: UploadFile = File(...)):
             extra={"request_id": request_id}
         )
 
-        # Validate file type
+        # Validate file type (handle content types with codecs like "audio/ogg; codecs=opus")
         allowed_types = [
             'audio/ogg', 'audio/mpeg', 'audio/wav', 'audio/x-wav',
             'audio/mp3', 'audio/mp4', 'audio/m4a', 'audio/x-m4a',
             'audio/aac', 'audio/flac', 'audio/webm'
         ]
         
-        if file.content_type and file.content_type not in allowed_types:
+        # Extract base content type (remove codecs and other parameters)
+        base_content_type = file.content_type.split(';')[0].strip() if file.content_type else ''
+        
+        if file.content_type and base_content_type not in allowed_types:
             logger.warning(f"Unsupported audio format: {file.content_type}", extra={"request_id": request_id})
             raise HTTPException(
                 status_code=400,
