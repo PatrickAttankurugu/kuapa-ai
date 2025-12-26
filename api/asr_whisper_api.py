@@ -23,7 +23,7 @@ SUPPORTED_LANGUAGES = {
 
 async def transcribe_audio(audio_path: str, language: Optional[str] = None) -> Dict[str, str]:
     """
-    Transcribe audio file using Google Gemini
+    Transcribe audio file using Google Gemini with improved language detection
     
     Args:
         audio_path: Path to audio file (.ogg, .mp3, .wav, etc.)
@@ -60,34 +60,43 @@ async def transcribe_audio(audio_path: str, language: Optional[str] = None) -> D
         
         logger.info("Audio file uploaded successfully")
         
-        # Create prompt based on language
+        # Create prompt with improved language detection
         if language and language in SUPPORTED_LANGUAGES:
             prompt = f"""Transcribe this audio recording. The speaker is speaking in {SUPPORTED_LANGUAGES[language]}.
 
 Instructions:
-1. Transcribe exactly what is said in the audio
-2. If speaking {SUPPORTED_LANGUAGES[language]}, transcribe in that language
-3. If you cannot understand the audio, respond with: "Could not transcribe audio"
-4. Only return the transcribed text, nothing else
+1. Listen carefully and transcribe exactly what is said
+2. Transcribe in {SUPPORTED_LANGUAGES[language]} using proper spelling
+3. If you cannot understand the audio clearly, respond with: "TRANSCRIPTION_FAILED"
+4. Return ONLY the transcribed text, nothing else
+5. Do not add any explanations or notes
 
 Transcription:"""
         else:
-            prompt = """Transcribe this audio recording. Detect the language automatically.
+            # Auto-detect language with explicit format
+            prompt = """Transcribe this audio recording and detect the language.
 
-The audio may be in one of these languages:
+The speaker may be using one of these languages:
 - English
-- Twi (Akan)
-- Ga
-- Ewe
-- Dagbani
+- Twi (Akan) - a Ghanaian language
+- Ga - a Ghanaian language
+- Ewe - a Ghanaian language  
+- Dagbani - a Ghanaian language
+
+Respond in this EXACT format:
+LANGUAGE: [language code: en, tw, ga, ee, or dag]
+TRANSCRIPTION: [exact transcription in the detected language]
 
 Instructions:
-1. Detect the language being spoken
-2. Transcribe exactly what is said
-3. If you cannot understand the audio, respond with: "Could not transcribe audio"
-4. Only return the transcribed text, nothing else
+1. Detect which language is being spoken
+2. Transcribe exactly what is said in that language
+3. Use proper spelling for the detected language
+4. Follow the format above EXACTLY
+5. If you cannot understand the audio, write:
+   LANGUAGE: en
+   TRANSCRIPTION: TRANSCRIPTION_FAILED
 
-Transcription:"""
+Audio transcription:"""
         
         # Use Gemini to transcribe
         model = genai.GenerativeModel('gemini-2.0-flash-exp')
@@ -98,10 +107,16 @@ Transcription:"""
             request_options={"timeout": 120}
         )
         
-        transcribed_text = response.text.strip()
+        response_text = response.text.strip()
         
-        # Detect language from text if not specified
-        detected_language = language or await _detect_language(transcribed_text)
+        # Parse response
+        if language:
+            # If language was specified, use it
+            transcribed_text = response_text
+            detected_language = language
+        else:
+            # Parse the structured response
+            detected_language, transcribed_text = _parse_transcription_response(response_text)
         
         # Clean up uploaded file from Gemini
         try:
@@ -118,16 +133,17 @@ Transcription:"""
             except Exception as e:
                 logger.warning(f"Failed to delete temporary file: {e}")
         
-        if not transcribed_text or transcribed_text == "Could not transcribe audio":
+        # Check for transcription failure
+        if not transcribed_text or transcribed_text == "TRANSCRIPTION_FAILED":
             logger.warning("Transcription failed or returned empty")
             return {
                 "text": "",
                 "language": detected_language,
-                "error": "Could not transcribe audio"
+                "error": "Could not transcribe audio clearly"
             }
         
         logger.info(f"Transcription successful: {transcribed_text[:100]}...")
-        logger.info(f"Detected language: {detected_language}")
+        logger.info(f"Detected language: {detected_language} ({SUPPORTED_LANGUAGES.get(detected_language, 'Unknown')})")
         
         return {
             "text": transcribed_text,
@@ -141,6 +157,93 @@ Transcription:"""
             "language": language or "en",
             "error": str(e)
         }
+
+
+def _parse_transcription_response(response_text: str) -> tuple[str, str]:
+    """
+    Parse the structured transcription response from Gemini
+    
+    Returns:
+        Tuple of (language_code, transcribed_text)
+    """
+    try:
+        lines = response_text.strip().split('\n')
+        language_code = "en"  # Default
+        transcription = ""
+        
+        for line in lines:
+            line = line.strip()
+            if line.startswith("LANGUAGE:"):
+                lang_part = line.replace("LANGUAGE:", "").strip().lower()
+                # Extract just the language code
+                if lang_part in SUPPORTED_LANGUAGES:
+                    language_code = lang_part
+                else:
+                    # Try to extract code from longer string
+                    for code in SUPPORTED_LANGUAGES.keys():
+                        if code in lang_part:
+                            language_code = code
+                            break
+            elif line.startswith("TRANSCRIPTION:"):
+                transcription = line.replace("TRANSCRIPTION:", "").strip()
+        
+        # If we didn't find the structured format, treat entire response as transcription
+        if not transcription:
+            transcription = response_text
+            # Try simple keyword detection as fallback
+            language_code = _simple_language_detection(response_text)
+        
+        return language_code, transcription
+    
+    except Exception as e:
+        logger.warning(f"Error parsing transcription response: {e}")
+        # Fallback: use simple detection
+        return _simple_language_detection(response_text), response_text
+
+
+def _simple_language_detection(text: str) -> str:
+    """
+    Simple keyword-based language detection as fallback
+    """
+    if not text:
+        return "en"
+    
+    text_lower = text.lower()
+    
+    # Twi-specific characters and common words
+    if any(char in text for char in ['ɔ', 'ɛ', 'ŋ']):
+        return "tw"
+    
+    # Common Twi words
+    twi_words = ['yɛ', 'wo', 'na', 'ne', 'aka', 'adɛn', 'ɛte', 'sɛn', 'dɛn', 'mepaakyɛw']
+    twi_count = sum(1 for word in twi_words if word in text_lower)
+    
+    # Common Ga words
+    ga_words = ['ni', 'ke', 'tsɛ', 'le', 'kɛ', 'mli', 'shwɛ']
+    ga_count = sum(1 for word in ga_words if word in text_lower)
+    
+    # Common Ewe words  
+    ewe_words = ['nye', 'wò', 'ɖe', 'le', 'na', 'ŋu', 'wo']
+    ewe_count = sum(1 for word in ewe_words if word in text_lower)
+    
+    # Common Dagbani words
+    dag_words = ['n', 'ka', 'be', 'ni', 'ti', 'di', 'la']
+    dag_count = sum(1 for word in dag_words if word in text_lower)
+    
+    # Return language with most matches (with threshold)
+    max_count = max(twi_count, ga_count, ewe_count, dag_count)
+    
+    if max_count >= 2:  # Need at least 2 matches to be confident
+        if twi_count == max_count:
+            return "tw"
+        elif ga_count == max_count:
+            return "ga"
+        elif ewe_count == max_count:
+            return "ee"
+        elif dag_count == max_count:
+            return "dag"
+    
+    return "en"  # Default to English
 
 
 async def _convert_audio_if_needed(audio_path: str) -> str:
@@ -178,36 +281,6 @@ async def _convert_audio_if_needed(audio_path: str) -> str:
         logger.error(f"Error converting audio: {str(e)}")
         # Return original path if conversion fails
         return audio_path
-
-
-async def _detect_language(text: str) -> str:
-    """
-    Detect language from transcribed text using simple heuristics
-    """
-    if not text:
-        return "en"
-    
-    text_lower = text.lower()
-    
-    # Simple keyword-based detection for Ghanaian languages
-    twi_keywords = ['me', 'wo', 'ɔ', 'ɛ', 'ne', 'na', 'yɛ', 'aka', 'adɛn']
-    ga_keywords = ['ni', 'ke', 'tsɛ', 'le', 'kɛ']
-    ewe_keywords = ['nye', 'wò', 'ɖe', 'le', 'na']
-    
-    # Count matches
-    twi_count = sum(1 for keyword in twi_keywords if keyword in text_lower)
-    ga_count = sum(1 for keyword in ga_keywords if keyword in text_lower)
-    ewe_count = sum(1 for keyword in ewe_keywords if keyword in text_lower)
-    
-    # Return language with most matches
-    if twi_count > ga_count and twi_count > ewe_count and twi_count > 0:
-        return "tw"
-    elif ga_count > ewe_count and ga_count > 0:
-        return "ga"
-    elif ewe_count > 0:
-        return "ee"
-    else:
-        return "en"  # Default to English
 
 
 # Legacy function for backward compatibility

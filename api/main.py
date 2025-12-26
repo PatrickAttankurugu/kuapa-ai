@@ -18,6 +18,10 @@ from .rag import retrieve_context
 from .llm import answer
 from .tts_en_google import synthesize_en
 
+# Constants
+MAX_AUDIO_SIZE = 10 * 1024 * 1024  # 10MB
+MAX_AUDIO_DURATION = 180  # 3 minutes in seconds
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if not GEMINI_API_KEY:
@@ -130,6 +134,7 @@ async def process_voice(file: UploadFile = File(...)):
     Process voice message from WhatsApp
     Supports: OGG, WAV, MP3, M4A and other audio formats
     Languages: English, Twi, Ga, Ewe, Dagbani
+    Max size: 10MB
     """
     request_id = str(uuid4())
     start = time.time()
@@ -152,12 +157,27 @@ async def process_voice(file: UploadFile = File(...)):
             logger.warning(f"Unsupported audio format: {file.content_type}", extra={"request_id": request_id})
             raise HTTPException(
                 status_code=400,
-                detail=f"Unsupported audio format: {file.content_type}. Supported: OGG, MP3, WAV, M4A"
+                detail=f"Unsupported audio format: {file.content_type}. Supported: OGG, MP3, WAV, M4A, AAC, FLAC"
             )
+
+        # Read and validate file size
+        contents = await file.read()
+        file_size = len(contents)
+        
+        if file_size > MAX_AUDIO_SIZE:
+            logger.warning(
+                f"Audio file too large: {file_size / 1024 / 1024:.2f}MB",
+                extra={"request_id": request_id}
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=f"Audio file too large ({file_size / 1024 / 1024:.2f}MB). Maximum size is 10MB. Please send a shorter voice message."
+            )
+        
+        logger.info(f"Audio file size: {file_size / 1024:.2f}KB", extra={"request_id": request_id})
 
         # Save uploaded file temporarily
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix)
-        contents = await file.read()
         tmp.write(contents)
         tmp.flush()
         tmp.close()
@@ -223,7 +243,8 @@ async def process_voice(file: UploadFile = File(...)):
             extra={
                 "request_id": request_id,
                 "duration_ms": total_ms,
-                "language": detected_language
+                "language": detected_language,
+                "transcription_length": len(transcribed_text)
             }
         )
 
@@ -246,7 +267,8 @@ async def process_voice(file: UploadFile = File(...)):
                     "ga": "Ga",
                     "ee": "Ewe",
                     "dag": "Dagbani"
-                }.get(detected_language, "Unknown")
+                }.get(detected_language, "Unknown"),
+                "file_size_kb": round(file_size / 1024, 2)
             }
         )
 

@@ -75,11 +75,24 @@ client.on('disconnected', (reason) => {
 });
 
 /**
+ * Safely get contact name
+ */
+async function getContactName(message) {
+    try {
+        const contact = await message.getContact();
+        return contact.pushname || contact.name || message.from;
+    } catch (error) {
+        // Fallback to phone number if getContact fails
+        return message.from.replace('@c.us', '');
+    }
+}
+
+/**
  * Process voice message
  * Downloads voice message, converts to format suitable for transcription
  */
-async function processVoiceMessage(message, chat, contact) {
-    const contactName = contact.pushname || contact.name || message.from;
+async function processVoiceMessage(message, chat) {
+    const contactName = await getContactName(message);
     
     try {
         console.log(`   🎙️ Processing voice message from ${contactName}...`);
@@ -172,17 +185,19 @@ async function processVoiceMessage(message, chat, contact) {
         // Clean up temp file in case of error
         try {
             const tempDir = path.join(__dirname, 'temp');
-            const files = fs.readdirSync(tempDir);
-            files.forEach(file => {
-                if (file.startsWith('voice_')) {
-                    const filePath = path.join(tempDir, file);
-                    try {
-                        fs.unlinkSync(filePath);
-                    } catch (e) {
-                        // Ignore cleanup errors
+            if (fs.existsSync(tempDir)) {
+                const files = fs.readdirSync(tempDir);
+                files.forEach(file => {
+                    if (file.startsWith('voice_')) {
+                        const filePath = path.join(tempDir, file);
+                        try {
+                            fs.unlinkSync(filePath);
+                        } catch (e) {
+                            // Ignore cleanup errors
+                        }
                     }
-                }
-            });
+                });
+            }
         } catch (cleanupError) {
             // Ignore cleanup errors
         }
@@ -218,19 +233,20 @@ client.on('message', async (message) => {
     try {
         const from = message.from;
         const messageBody = message.body.trim();
-        const contact = await message.getContact();
-        const contactName = contact.pushname || contact.name || from;
 
         // Ignore group messages and status updates
         if (from.includes('@g.us') || from.includes('status@broadcast')) {
             return;
         }
 
+        // Get contact name safely
+        const contactName = await getContactName(message);
+
         // Check if message is a voice message (PTT - Push to Talk)
         if (message.hasMedia && message.type === 'ptt') {
             console.log(`\n🎙️ Voice message from ${contactName} (${from})`);
             const chat = await message.getChat();
-            await processVoiceMessage(message, chat, contact);
+            await processVoiceMessage(message, chat);
             return;
         }
 
@@ -238,7 +254,7 @@ client.on('message', async (message) => {
         if (message.hasMedia && (message.type === 'audio' || message.type === 'voice')) {
             console.log(`\n🎙️ Audio message from ${contactName} (${from})`);
             const chat = await message.getChat();
-            await processVoiceMessage(message, chat, contact);
+            await processVoiceMessage(message, chat);
             return;
         }
 
