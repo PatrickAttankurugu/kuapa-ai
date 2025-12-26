@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kuapa AI - Agricultural Advisory Assistant</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Kuapa AI</h1>
+            <p class="subtitle">Agricultural Advisory Assistant for Farmers</p>
+            <div class="status-indicator">
+                <span id="connection-status" class="status-dot"></span>
+                <span id="connection-text">Connecting...</span>
+            </div>
+        </header>
+
+        <div class="chat-container">
+            <div id="chat-messages" class="chat-messages"></div>
+            <div class="chat-input-container">
+                <input
+                    type="text"
+                    id="message-input"
+                    placeholder="Ask about farming, crops, pests, diseases..."
+                    autocomplete="off"
+                >
+                <button id="send-button">Send</button>
+            </div>
+        </div>
+
+        <div class="suggestions">
+            <p>Try asking:</p>
+            <button class="suggestion-btn" data-question="What are symptoms of nitrogen deficiency in maize?">
+                Nitrogen deficiency in maize
+            </button>
+            <button class="suggestion-btn" data-question="How do I control aphids on my tomatoes?">
+                Aphid control on tomatoes
+            </button>
+            <button class="suggestion-btn" data-question="What is the best fertilizer application rate for cassava?">
+                Fertilizer for cassava
+            </button>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

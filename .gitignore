@@ -1,0 +1,40 @@
+# env files
+.env
+api/.env
+gateway/.env
+api/secrets/
+whatsapp-bot/.env
+
+# node modules and build
+gateway/node_modules/
+gateway/dist/
+whatsapp-bot/node_modules/
+
+# python caches
+__pycache__/
+*.pyc
+
+# sessions and media
+gateway/session/
+gateway/media/
+
+# WhatsApp Web.js authentication
+whatsapp-bot/.wwebjs_auth/
+whatsapp-bot/.wwebjs_cache/
+
+# Logs
+logs/
+*.log
+*.pid
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+
