@@ -19,6 +19,7 @@ from .llm import answer
 from .tts_en_google import synthesize_en
 from .database import init_db, close_db, get_db_context
 from .user_service import UserService
+from .language_service import detect_language, translate_to_english
 
 # Constants
 MAX_AUDIO_SIZE = 10 * 1024 * 1024  # 10MB
@@ -115,22 +116,42 @@ async def chat(request: ChatRequest) -> ChatResponse:
     start = time.time()
 
     try:
+        # Detect language of incoming message
+        detected_lang, confidence = detect_language(request.message)
+        
         logger.info(
             f"Chat request received",
             extra={
                 "request_id": request_id,
                 "phone_number": request.phone_number,
-                "has_user_info": bool(request.phone_number)
+                "has_user_info": bool(request.phone_number),
+                "detected_language": detected_lang,
+                "language_confidence": f"{confidence:.2f}"
             }
         )
 
+        # Translate to English for RAG processing if needed
+        query_for_rag = request.message
+        if detected_lang != 'en':
+            translation_result = translate_to_english(request.message, detected_lang)
+            query_for_rag = translation_result['text']
+            logger.info(
+                f"Translated query for RAG",
+                extra={
+                    "request_id": request_id,
+                    "original": request.message[:50],
+                    "translated": query_for_rag[:50]
+                }
+            )
+
         rag_start = time.time()
-        ctx = retrieve_context(request.message)
+        ctx = retrieve_context(query_for_rag)
         rag_ms = int((time.time() - rag_start) * 1000)
         logger.info(f"RAG retrieved {len(ctx)} context chunks", extra={"request_id": request_id})
 
         llm_start = time.time()
-        response_text = await answer(request.message, ctx)
+        # Pass original message and detected language to LLM for natural response
+        response_text = await answer(request.message, ctx, language=detected_lang)
         llm_ms = int((time.time() - llm_start) * 1000)
 
         total_ms = int((time.time() - start) * 1000)
@@ -150,6 +171,11 @@ async def chat(request: ChatRequest) -> ChatResponse:
                         # Get or create conversation
                         conversation = UserService.get_or_create_conversation(db, user.id)
                         
+                        # Update user's preferred language if different
+                        if user.preferred_language != detected_lang:
+                            from .user_service import UserService
+                            UserService.update_user_language(db, user.id, detected_lang)
+                        
                         # Save incoming message
                         UserService.save_message(
                             db=db,
@@ -158,7 +184,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
                             content=request.message,
                             direction="incoming",
                             message_type="text",
-                            language="en"
+                            language=detected_lang
                         )
                         
                         # Save outgoing response
@@ -169,7 +195,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
                             content=response_text,
                             direction="outgoing",
                             message_type="text",
-                            language="en"
+                            language=detected_lang
                         )
                         
                         logger.info(
