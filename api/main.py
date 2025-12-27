@@ -12,11 +12,13 @@ import os
 from pathlib import Path
 
 from .logger import logger
-from .config import GEMINI_API_KEY
+from .config import GEMINI_API_KEY, DATABASE_URL
 from .asr_whisper_api import transcribe_audio
 from .rag import retrieve_context
 from .llm import answer
 from .tts_en_google import synthesize_en
+from .database import init_db, close_db, get_db_context
+from .user_service import UserService
 
 # Constants
 MAX_AUDIO_SIZE = 10 * 1024 * 1024  # 10MB
@@ -28,6 +30,15 @@ async def lifespan(app: FastAPI):
         logger.error("GEMINI_API_KEY not set - LLM functionality will be limited")
     else:
         logger.info("Kuapa AI starting up with Gemini integration")
+    
+    # Initialize database
+    if DATABASE_URL:
+        if init_db():
+            logger.info("Database initialized successfully")
+        else:
+            logger.warning("Database initialization failed - running without database")
+    else:
+        logger.warning("DATABASE_URL not set - running without database")
 
     media_out = Path("media/out")
     media_out.mkdir(parents=True, exist_ok=True)
@@ -35,6 +46,8 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # Cleanup
+    close_db()
     logger.info("Kuapa AI shutting down")
 
 app = FastAPI(
@@ -54,6 +67,8 @@ app.add_middleware(
 
 class ChatRequest(BaseModel):
     message: str
+    phone_number: Optional[str] = None
+    user_name: Optional[str] = None
 
 class ChatResponse(BaseModel):
     response: str
@@ -100,7 +115,14 @@ async def chat(request: ChatRequest) -> ChatResponse:
     start = time.time()
 
     try:
-        logger.info(f"Chat request received", extra={"request_id": request_id})
+        logger.info(
+            f"Chat request received",
+            extra={
+                "request_id": request_id,
+                "phone_number": request.phone_number,
+                "has_user_info": bool(request.phone_number)
+            }
+        )
 
         rag_start = time.time()
         ctx = retrieve_context(request.message)
@@ -112,6 +134,55 @@ async def chat(request: ChatRequest) -> ChatResponse:
         llm_ms = int((time.time() - llm_start) * 1000)
 
         total_ms = int((time.time() - start) * 1000)
+
+        # Save to database if phone number provided
+        if request.phone_number and DATABASE_URL:
+            try:
+                with get_db_context() as db:
+                    if db:
+                        # Get or create user
+                        user = UserService.get_or_create_user(
+                            db,
+                            phone_number=request.phone_number,
+                            name=request.user_name
+                        )
+                        
+                        # Get or create conversation
+                        conversation = UserService.get_or_create_conversation(db, user.id)
+                        
+                        # Save incoming message
+                        UserService.save_message(
+                            db=db,
+                            user_id=user.id,
+                            conversation_id=conversation.id,
+                            content=request.message,
+                            direction="incoming",
+                            message_type="text",
+                            language="en"
+                        )
+                        
+                        # Save outgoing response
+                        UserService.save_message(
+                            db=db,
+                            user_id=user.id,
+                            conversation_id=conversation.id,
+                            content=response_text,
+                            direction="outgoing",
+                            message_type="text",
+                            language="en"
+                        )
+                        
+                        logger.info(
+                            f"Messages saved to database",
+                            extra={"request_id": request_id, "user_id": str(user.id)}
+                        )
+            except Exception as db_error:
+                logger.error(
+                    f"Error saving to database: {str(db_error)}",
+                    extra={"request_id": request_id},
+                    exc_info=True
+                )
+                # Don't fail the request if database save fails
 
         logger.info(
             f"Chat request completed",
@@ -129,7 +200,11 @@ async def chat(request: ChatRequest) -> ChatResponse:
         raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
 
 @app.post("/process_voice")
-async def process_voice(file: UploadFile = File(...)):
+async def process_voice(
+    file: UploadFile = File(...),
+    phone_number: Optional[str] = None,
+    user_name: Optional[str] = None
+):
     """
     Process voice message from WhatsApp
     Supports: OGG, WAV, MP3, M4A and other audio formats
@@ -143,7 +218,11 @@ async def process_voice(file: UploadFile = File(...)):
     try:
         logger.info(
             f"Voice message received: {file.filename} ({file.content_type})",
-            extra={"request_id": request_id}
+            extra={
+                "request_id": request_id,
+                "phone_number": phone_number,
+                "has_user_info": bool(phone_number)
+            }
         )
 
         # Validate file type (handle content types with codecs like "audio/ogg; codecs=opus")
@@ -241,6 +320,57 @@ async def process_voice(file: UploadFile = File(...)):
 
         total_ms = int((time.time() - start) * 1000)
 
+        # Save to database if phone number provided
+        if phone_number and DATABASE_URL:
+            try:
+                with get_db_context() as db:
+                    if db:
+                        # Get or create user
+                        user = UserService.get_or_create_user(
+                            db,
+                            phone_number=phone_number,
+                            name=user_name
+                        )
+                        
+                        # Get or create conversation
+                        conversation = UserService.get_or_create_conversation(db, user.id)
+                        
+                        # Save incoming voice message with transcription
+                        UserService.save_message(
+                            db=db,
+                            user_id=user.id,
+                            conversation_id=conversation.id,
+                            content=response_text,  # Store AI response in content
+                            transcribed_text=transcribed_text,  # Store transcription separately
+                            direction="incoming",
+                            message_type="voice",
+                            language=detected_language,
+                            audio_file_path=file.filename
+                        )
+                        
+                        # Save outgoing response
+                        UserService.save_message(
+                            db=db,
+                            user_id=user.id,
+                            conversation_id=conversation.id,
+                            content=response_text,
+                            direction="outgoing",
+                            message_type="text",
+                            language=detected_language
+                        )
+                        
+                        logger.info(
+                            f"Voice messages saved to database",
+                            extra={"request_id": request_id, "user_id": str(user.id)}
+                        )
+            except Exception as db_error:
+                logger.error(
+                    f"Error saving voice to database: {str(db_error)}",
+                    extra={"request_id": request_id},
+                    exc_info=True
+                )
+                # Don't fail the request if database save fails
+
         logger.info(
             f"Voice message processed successfully",
             extra={
@@ -308,6 +438,169 @@ async def get_audio(filename: str):
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Audio file not found")
     return FileResponse(file_path, media_type="audio/mpeg")
+
+# User Management Endpoints
+
+@app.get("/users")
+async def list_users(limit: int = 10, offset: int = 0):
+    """
+    List all users in the database
+    """
+    if not DATABASE_URL:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    
+    try:
+        with get_db_context() as db:
+            if not db:
+                raise HTTPException(status_code=503, detail="Database connection failed")
+            
+            from .models import User
+            users = db.query(User).offset(offset).limit(limit).all()
+            
+            return {
+                "users": [user.to_dict() for user in users],
+                "count": len(users),
+                "offset": offset,
+                "limit": limit
+            }
+    except Exception as e:
+        logger.error(f"Error fetching users: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error fetching users: {str(e)}")
+
+@app.get("/users/{phone_number}")
+async def get_user(phone_number: str):
+    """
+    Get user details by phone number
+    """
+    if not DATABASE_URL:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    
+    try:
+        with get_db_context() as db:
+            if not db:
+                raise HTTPException(status_code=503, detail="Database connection failed")
+            
+            from .models import User
+            user = db.query(User).filter(User.phone_number == phone_number).first()
+            
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+            
+            # Get user stats
+            stats = UserService.get_user_stats(db, user.id)
+            
+            return {
+                "user": user.to_dict(),
+                "stats": stats
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching user: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error fetching user: {str(e)}")
+
+@app.get("/users/{phone_number}/messages")
+async def get_user_messages(phone_number: str, limit: int = 20):
+    """
+    Get conversation history for a user
+    """
+    if not DATABASE_URL:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    
+    try:
+        with get_db_context() as db:
+            if not db:
+                raise HTTPException(status_code=503, detail="Database connection failed")
+            
+            from .models import User
+            user = db.query(User).filter(User.phone_number == phone_number).first()
+            
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+            
+            messages = UserService.get_conversation_history(db, user.id, limit=limit)
+            
+            return {
+                "phone_number": phone_number,
+                "messages": [msg.to_dict() for msg in messages],
+                "count": len(messages)
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching messages: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error fetching messages: {str(e)}")
+
+@app.get("/stats")
+async def get_overall_stats():
+    """
+    Get overall system statistics
+    """
+    if not DATABASE_URL:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    
+    try:
+        with get_db_context() as db:
+            if not db:
+                raise HTTPException(status_code=503, detail="Database connection failed")
+            
+            from .models import User, Message, Conversation
+            from sqlalchemy import func
+            
+            total_users = db.query(User).count()
+            total_messages = db.query(Message).count()
+            total_conversations = db.query(Conversation).count()
+            voice_messages = db.query(Message).filter(Message.message_type == "voice").count()
+            text_messages = db.query(Message).filter(Message.message_type == "text").count()
+            
+            # Get language distribution
+            language_dist = db.query(
+                Message.language,
+                func.count(Message.id)
+            ).group_by(Message.language).all()
+            
+            return {
+                "total_users": total_users,
+                "total_messages": total_messages,
+                "total_conversations": total_conversations,
+                "message_types": {
+                    "voice": voice_messages,
+                    "text": text_messages
+                },
+                "languages": {
+                    lang: count for lang, count in language_dist
+                }
+            }
+    except Exception as e:
+        logger.error(f"Error fetching stats: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error fetching stats: {str(e)}")
+
+@app.get("/health/db")
+async def database_health():
+    """
+    Check database connection health
+    """
+    from .database import check_db_health
+    
+    if not DATABASE_URL:
+        return {
+            "status": "disabled",
+            "message": "Database not configured"
+        }
+    
+    is_healthy = check_db_health()
+    
+    if is_healthy:
+        return {
+            "status": "healthy",
+            "database": "kuapa_ai",
+            "connection": "active"
+        }
+    else:
+        return {
+            "status": "unhealthy",
+            "message": "Database connection failed"
+        }
 
 class ConnectionManager:
     def __init__(self):

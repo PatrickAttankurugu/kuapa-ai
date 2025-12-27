@@ -126,12 +126,17 @@ async function processVoiceMessage(message, chat) {
         console.log(`   💾 Voice saved to: ${tempFilePath}`);
         console.log(`   📤 Sending to Python backend for transcription...`);
         
+        // Extract phone number from WhatsApp ID
+        const phoneNumber = message.from.replace('@c.us', '');
+        
         // Send to Python backend for transcription and processing
         const formData = new FormData();
         formData.append('file', fs.createReadStream(tempFilePath), {
             filename: `voice_${timestamp}.ogg`,
             contentType: media.mimetype || 'audio/ogg'
         });
+        formData.append('phone_number', phoneNumber);
+        formData.append('user_name', contactName);
         
         const startTime = Date.now();
         
@@ -326,9 +331,14 @@ Just ask and I'll do my best to help! 🌾`;
 
         const startTime = Date.now();
 
-        // Call Python backend
+        // Extract phone number from WhatsApp ID
+        const phoneNumber = from.replace('@c.us', '');
+        
+        // Call Python backend with phone number for user tracking
         const response = await axios.post(`${PYTHON_API_URL}/chat`, {
-            message: messageBody
+            message: messageBody,
+            phone_number: phoneNumber,
+            user_name: contactName
         }, {
             timeout: 60000, // 60 second timeout
             headers: {
